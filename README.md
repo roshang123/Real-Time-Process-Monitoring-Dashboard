@@ -1,1 +1,2 @@
 # Real-Time-Process-Monitoring-Dashboard
+The Real-Time Process Monitoring Dashboard tracks and manages system processes with live updates, displaying CPU usage, memory consumption, and execution time. It features sorting, filtering, process control (pause, resume, terminate), and AI-powered insights for performance optimization. Built using Python (psutil, Flask/FastAPI) and a React.js/Electron.js interface, it provides an interactive and efficient monitoring experience.
