@@ -1,132 +1,126 @@
+from dash import Dash, html, dcc, Input, Output, State, ctx
+import dash
+import plotly.express as px
 import psutil
-import tkinter as tk
-from tkinter import ttk
+from collections import deque
+import time
+from threading import Thread
 
-class ProcessMonitor:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Real-Time Process Monitoring Dashboard")
-        self.root.geometry("800x400")
+app = Dash(__name__)
+app.title = "Real-Time Process Monitoring Dashboard"
 
-        # Setting up the treeview
-        self.tree = ttk.Treeview(root, columns=("PID", "Name", "CPU", "Memory"), show="headings")
-        self.tree.heading("PID", text="PID")
-        self.tree.heading("Name", text="Name")
-        self.tree.heading("CPU", text="CPU (%)")
-        self.tree.heading("Memory", text="Memory (MB)")
-        self.tree.pack(fill=tk.BOTH, expand=True)
+NUM_CPUS = psutil.cpu_count(logical=True)
 
-        # Refresh data every second
-        self.update_processes()
+# Data Storage (Keep only last 10 seconds of data)
+cpu_data = deque(maxlen=5)  # 5 entries, since interval is 2 sec -> 10 sec data
+memory_data = deque(maxlen=5)
+timestamps = deque(maxlen=5)
 
-    def update_processes(self):
-        # Clear previous data
-        for row in self.tree.get_children():
-            self.tree.delete(row)
+CARD_STYLE = {
+    "backgroundColor": "#1e1e1e",
+    "color": "#ffffff",
+    "borderRadius": "10px",
+    "padding": "15px",
+    "boxShadow": "0px 4px 10px rgba(0,0,0,0.3)",
+    "textAlign": "center"
+}
 
-        # Fetch and display process data
-        for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_info']):
-            try:
-                pid = proc.info['pid']
-                name = proc.info['name']
-                cpu = proc.info['cpu_percent']
-                memory = proc.info['memory_info'].rss / (1024 * 1024)  # Convert to MB
-                self.tree.insert("", "end", values=(pid, name, cpu, round(memory, 2)))
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
+app.layout = html.Div([
+    html.H1("Real-Time Process Monitoring Dashboard", style={"textAlign": "center", "color": "#fff"}),
 
-        # Schedule next update
-        self.root.after(1000, self.update_processes)
+    html.Div([
+        html.Div([
+            dcc.Graph(id='memory-usage-graph', style={"height": "300px"}),
+            html.P(id="memory-text", style={"textAlign": "center", "fontSize": "16px", "fontWeight": "bold"})
+        ], style={**CARD_STYLE, "flex": "1", "minWidth": "400px"}),
+
+        html.Div([
+            dcc.Graph(id='cpu-usage-graph', style={"height": "300px"}),
+            html.P(id="cpu-text", style={"textAlign": "center", "fontSize": "16px", "fontWeight": "bold"})
+        ], style={**CARD_STYLE, "flex": "1", "minWidth": "400px"}),
+    ], style={"display": "flex", "gap": "20px", "justifyContent": "center", "margin": "20px"}),
+
+    html.Div(id='process-table', style={"width": "90%", "margin": "auto", "color": "#fff"}),
+
+    dcc.Interval(id='interval-component', interval=2000, n_intervals=0)
+], style={"backgroundColor": "#121212", "padding": "20px", "minHeight": "100vh"})
+
+
+# Background Data Collection
+def update_data():
+    while True:
+        timestamps.append(time.strftime("%H:%M:%S"))
+        cpu_data.append(psutil.cpu_percent())
+        memory_data.append(psutil.virtual_memory().percent)
+        time.sleep(2)
+
+Thread(target=update_data, daemon=True).start()
+
+
+# Update Dashboard and Handle Process Killing
+@app.callback(
+    [Output('cpu-usage-graph', 'figure'),
+     Output('memory-usage-graph', 'figure'),
+     Output('cpu-text', 'children'),
+     Output('memory-text', 'children'),
+     Output('process-table', 'children')],
+    [Input('interval-component', 'n_intervals'),
+     Input({'type': 'kill-btn', 'index': dash.dependencies.ALL}, 'n_clicks')],
+    [State({'type': 'kill-btn', 'index': dash.dependencies.ALL}, 'id')]
+)
+def update_dashboard(n, n_clicks, button_ids):
+    # Handle process termination
+    if n_clicks and any(clicks is not None and clicks > 0 for clicks in n_clicks):
+        for i, clicks in enumerate(n_clicks):
+            if clicks and button_ids:
+                pid_to_kill = button_ids[i]['index']
+                try:
+                    psutil.Process(pid_to_kill).terminate()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass  # Process might have already been killed
+
+    # Update Graphs
+    cpu_fig = px.line(x=list(timestamps), y=list(cpu_data), labels={'x': 'Time', 'y': 'CPU Usage (%)'})
+    cpu_fig.update_layout(template="plotly_dark")
+
+    memory_fig = px.line(x=list(timestamps), y=list(memory_data), labels={'x': 'Time', 'y': 'Memory Usage (%)'})
+    memory_fig.update_layout(template="plotly_dark")
+
+    cpu_text = f"CPU Usage: {cpu_data[-1]:.2f}%"
+    memory_text = f"Memory Usage: {memory_data[-1]:.2f}%"
+
+    # Process Table
+    processes = []
+    for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent']):
+        try:
+            cpu_percent = proc.info['cpu_percent'] / NUM_CPUS
+            processes.append(html.Tr([
+                html.Td(proc.info['pid'], style={"padding": "8px", "border": "1px solid #666"}),
+                html.Td(proc.info['name'], style={"padding": "8px", "border": "1px solid #666"}),
+                html.Td(f"{cpu_percent:.2f}%", style={"padding": "8px", "border": "1px solid #666"}),
+                html.Td(f"{proc.info['memory_percent']:.2f}%", style={"padding": "8px", "border": "1px solid #666"}),
+                html.Td(html.Button('Kill', id={'type': 'kill-btn', 'index': proc.info['pid']}, n_clicks=0,
+                                    style={"backgroundColor": "#FF4C4C", "color": "white", "border": "none",
+                                           "padding": "6px 10px", "borderRadius": "5px", "cursor": "pointer"}))
+            ]))
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+
+    process_table = html.Table([
+        html.Thead(html.Tr([
+            html.Th("PID", style={"padding": "10px", "border": "1px solid #888", "backgroundColor": "#333"}),
+            html.Th("Name", style={"padding": "10px", "border": "1px solid #888", "backgroundColor": "#333"}),
+            html.Th("CPU (%)", style={"padding": "10px", "border": "1px solid #888", "backgroundColor": "#333"}),
+            html.Th("Memory (%)", style={"padding": "10px", "border": "1px solid #888", "backgroundColor": "#333"}),
+            html.Th("Action", style={"padding": "10px", "border": "1px solid #888", "backgroundColor": "#333"})
+        ])),
+        html.Tbody(processes)
+    ], style={"width": "100%", "borderCollapse": "collapse", "marginTop": "20px"})
+
+    return cpu_fig, memory_fig, cpu_text, memory_text, process_table
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = ProcessMonitor(root)
-    root.mainloop()
+    app.run(debug=True)
 
 
-
-
-
-# import tkinter as tk
-# from tkinter import ttk
-# import psutil
-# import time
-# import threading
-# import matplotlib.pyplot as plt
-# from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-
-# class DashboardApp:
-#     def __init__(self, root):
-#         self.root = root
-#         self.root.title("🚀 System Dashboard")
-#         self.root.geometry("900x600")
-#         self.root.configure(bg="#2C3E50")
-
-#         # Title Label
-#         title_label = tk.Label(root, text="📊 System Performance Dashboard", font=("Arial", 16, "bold"), fg="white", bg="#34495E")
-#         title_label.pack(fill=tk.X, pady=10)
-
-#         # Frames for Widgets
-#         self.info_frame = tk.Frame(root, bg="#2C3E50")
-#         self.info_frame.pack(fill=tk.BOTH, expand=True)
-
-#         # System Info Labels
-#         self.cpu_label = ttk.Label(self.info_frame, text="CPU Usage: ⏳", font=("Arial", 12, "bold"), background="#2C3E50", foreground="white")
-#         self.cpu_label.pack(pady=5)
-
-#         self.memory_label = ttk.Label(self.info_frame, text="Memory Usage: 🔄", font=("Arial", 12, "bold"), background="#2C3E50", foreground="white")
-#         self.memory_label.pack(pady=5)
-
-#         self.uptime_label = ttk.Label(self.info_frame, text="System Uptime: ⏱️", font=("Arial", 12, "bold"), background="#2C3E50", foreground="white")
-#         self.uptime_label.pack(pady=5)
-
-#         # Graph for CPU & Memory
-#         self.fig, self.axs = plt.subplots(2, 1, figsize=(5, 4), dpi=100)
-#         self.cpu_data = []
-#         self.memory_data = []
-        
-#         self.canvas = FigureCanvasTkAgg(self.fig, master=root)
-#         self.canvas.get_tk_widget().pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True)
-
-#         self.update_info()
-#         self.update_graphs()
-
-#     def update_info(self):
-#         """ Updates CPU, Memory, and Uptime information. """
-#         self.cpu_label.config(text=f"CPU Usage: {psutil.cpu_percent()}% 🔥")
-#         self.memory_label.config(text=f"Memory Usage: {psutil.virtual_memory().percent}% 🖥️")
-
-#         uptime_seconds = time.time() - psutil.boot_time()
-#         uptime_hours = int(uptime_seconds // 3600)
-#         uptime_minutes = int((uptime_seconds % 3600) // 60)
-#         self.uptime_label.config(text=f"System Uptime: {uptime_hours}h {uptime_minutes}m ⏳")
-
-#         self.root.after(3000, self.update_info)  # Update every 3 sec
-
-#     def update_graphs(self):
-#         """ Updates the CPU and Memory usage graphs. """
-#         self.cpu_data.append(psutil.cpu_percent())
-#         self.memory_data.append(psutil.virtual_memory().percent)
-
-#         if len(self.cpu_data) > 50:
-#             self.cpu_data.pop(0)
-#             self.memory_data.pop(0)
-
-#         self.axs[0].cla()
-#         self.axs[0].plot(self.cpu_data, color='red', label="CPU Usage %")
-#         self.axs[0].set_ylim(0, 100)
-#         self.axs[0].legend(loc="upper right")
-        
-#         self.axs[1].cla()
-#         self.axs[1].plot(self.memory_data, color='blue', label="Memory Usage %")
-#         self.axs[1].set_ylim(0, 100)
-#         self.axs[1].legend(loc="upper right")
-
-#         self.canvas.draw()
-#         self.root.after(3000, self.update_graphs)  # Update every 3 sec
-
-# if __name__ == "__main__":
-#     root = tk.Tk()
-#     app = DashboardApp(root)
-#     root.mainloop()
